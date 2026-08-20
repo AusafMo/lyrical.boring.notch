@@ -25,7 +25,7 @@ jobs:
         platform:
           - macOS
         xcode:
-          - ^16
+          - ^26
         scheme:
           - boringNotch
     runs-on: macos-latest
