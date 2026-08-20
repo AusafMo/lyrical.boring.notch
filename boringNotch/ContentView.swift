@@ -54,13 +54,15 @@ struct ContentView: View {
 
     // Helper to determine if current display has a notch (fork)
     private var hasNotch: Bool {
-        let currentScreen = NSScreen.screens.first { $0.localizedName == vm.screen }
+        let currentScreen = vm.screenUUID.flatMap { NSScreen.screen(withUUID: $0) }
         return (currentScreen?.safeAreaInsets.top ?? 0) > 0
     }
 
     // Get lyrics display mode for current screen (per-display setting with fallback to global) (fork)
+    // perDisplayLyricsMode is keyed by screen localizedName (see Settings/Appearance picker),
+    // so resolve the current screen UUID back to its name.
     private var currentDisplayLyricsMode: LyricsDisplayMode {
-        guard let screenName = vm.screen else {
+        guard let screenName = vm.screenUUID.flatMap({ NSScreen.screen(withUUID: $0) })?.localizedName else {
             return Defaults[.lyricsDisplayMode]
         }
         return Defaults[.perDisplayLyricsMode][screenName] ?? Defaults[.lyricsDisplayMode]
