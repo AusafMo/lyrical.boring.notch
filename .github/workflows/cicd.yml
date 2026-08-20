@@ -40,6 +40,6 @@ jobs:
         platform: ${{ matrix.platform }}
         scheme: ${{ matrix.scheme }}
         action: build
-        verbosity: xcpretty
+        verbosity: verbose
         upload-logs: always
         configuration: release
