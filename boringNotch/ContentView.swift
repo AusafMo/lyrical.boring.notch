@@ -23,7 +23,9 @@ struct ContentView: View {
     @ObservedObject var batteryModel = BatteryStatusViewModel.shared
     @ObservedObject var brightnessManager = BrightnessManager.shared
     @ObservedObject var volumeManager = VolumeManager.shared
-    @State private var hoverTask: Task<Void, Never>?
+    @State private var hoverWorkItem: DispatchWorkItem?
+    @State private var debounceWorkItem: DispatchWorkItem?
+    @State private var isHoverStateChanging: Bool = false
     @State private var isHovering: Bool = false
     @State private var anyDropDebounceTask: Task<Void, Never>?
 
@@ -310,38 +312,24 @@ struct ContentView: View {
                                 handleUpGesture(translation: translation, phase: phase)
                             }
                     }
-                    .onReceive(NotificationCenter.default.publisher(for: .sharingDidFinish)) { _ in
-                        if vm.notchState == .open && !isHovering && !vm.isBatteryPopoverActive {
-                            hoverTask?.cancel()
-                            hoverTask = Task {
-                                try? await Task.sleep(for: .milliseconds(100))
-                                guard !Task.isCancelled else { return }
-                                await MainActor.run {
-                                    if self.vm.notchState == .open && !self.isHovering && !self.vm.isBatteryPopoverActive && !SharingStateManager.shared.preventNotchClose {
-                                        self.vm.close()
-                                    }
-                                }
-                            }
-                        }
-                    }
                     .onChange(of: vm.notchState) { _, newState in
+                        // Reset hover state when notch state changes
                         if newState == .closed && isHovering {
+                            // Only reset visually, without triggering the hover logic again
+                            isHoverStateChanging = true
                             withAnimation {
                                 isHovering = false
                             }
+                            // Reset the flag after the animation completes
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                                isHoverStateChanging = false
+                            }
                         }
                     }
-                    .onChange(of: vm.isBatteryPopoverActive) {
-                        if !vm.isBatteryPopoverActive && !isHovering && vm.notchState == .open && !SharingStateManager.shared.preventNotchClose {
-                            hoverTask?.cancel()
-                            hoverTask = Task {
-                                try? await Task.sleep(for: .milliseconds(100))
-                                guard !Task.isCancelled else { return }
-                                await MainActor.run {
-                                    if !self.vm.isBatteryPopoverActive && !self.isHovering && self.vm.notchState == .open && !SharingStateManager.shared.preventNotchClose {
-                                        self.vm.close()
-                                    }
-                                }
+                    .onChange(of: vm.isBatteryPopoverActive) { _, newPopoverState in
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                            if !newPopoverState && !isHovering && vm.notchState == .open && !SharingStateManager.shared.preventNotchClose {
+                                vm.close()
                             }
                         }
                     }
@@ -947,49 +935,64 @@ struct ContentView: View {
     // MARK: - Hover Management
 
     private func handleHover(_ hovering: Bool) {
-        if coordinator.firstLaunch { return }
-        hoverTask?.cancel()
-        
+        // Don't process events if we're already transitioning
+        if isHoverStateChanging { return }
+
+        // Cancel any pending tasks
+        hoverWorkItem?.cancel()
+        hoverWorkItem = nil
+        debounceWorkItem?.cancel()
+        debounceWorkItem = nil
+
         if hovering {
-            withAnimation(animationSpring) {
+            // Handle mouse enter
+            withAnimation(.bouncy.speed(1.2)) {
                 isHovering = true
             }
-            
+
+            // Only provide haptic feedback if notch is closed
             if vm.notchState == .closed && Defaults[.enableHaptics] {
                 haptics.toggle()
             }
-            
-            guard vm.notchState == .closed,
-                  !coordinator.sneakPeek.show,
-                  Defaults[.openNotchOnHover] else { return }
-            
-            hoverTask = Task {
-                try? await Task.sleep(for: .seconds(Defaults[.minimumHoverDuration]))
-                guard !Task.isCancelled else { return }
-                
-                await MainActor.run {
-                    guard self.vm.notchState == .closed,
-                          self.isHovering,
-                          !self.coordinator.sneakPeek.show else { return }
-                    
-                    self.doOpen()
-                }
+
+            // Don't open notch if there's a sneak peek showing
+            if coordinator.sneakPeek.show {
+                return
             }
+
+            guard Defaults[.openNotchOnHover] else { return }
+
+            // Delay opening the notch
+            let task = DispatchWorkItem {
+                // ContentView is a struct, so we don't use weak self here
+                guard vm.notchState == .closed, isHovering else { return }
+                doOpen()
+            }
+
+            hoverWorkItem = task
+            DispatchQueue.main.asyncAfter(
+                deadline: .now() + Defaults[.minimumHoverDuration],
+                execute: task
+            )
         } else {
-            hoverTask = Task {
-                try? await Task.sleep(for: .milliseconds(100))
-                guard !Task.isCancelled else { return }
-                
-                await MainActor.run {
-                    withAnimation(animationSpring) {
-                        self.isHovering = false
-                    }
-                    
-                    if self.vm.notchState == .open && !self.vm.isBatteryPopoverActive && !SharingStateManager.shared.preventNotchClose {
-                        self.vm.close()
-                    }
+            // Handle mouse exit with debounce to prevent flickering
+            let debounce = DispatchWorkItem {
+                // ContentView is a struct, so we don't use weak self here
+
+                // Update visual state
+                withAnimation(.bouncy.speed(1.2)) {
+                    isHovering = false
+                }
+
+                // Close the notch if it's open and battery popover is not active
+                if vm.notchState == .open && !vm.isBatteryPopoverActive && !SharingStateManager.shared.preventNotchClose {
+                    vm.close()
                 }
             }
+
+            debounceWorkItem = debounce
+            // Add a small delay to debounce rapid mouse movements
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: debounce)
         }
     }
 
